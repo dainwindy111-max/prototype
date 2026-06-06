@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>candle</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    font-family:"DM Sans",system-ui,sans-serif;
+    background:
+      radial-gradient(46% 34% at 50% 40%, rgba(150,72,18,.30), transparent 66%),
+      radial-gradient(120% 90% at 50% 30%, #101015 0%, #0a0a0d 50%, #050506 100%);
+    min-height:100dvh;display:flex;flex-direction:column;align-items:center;justify-content:center;
+    gap:6px;padding:24px 16px;-webkit-font-smoothing:antialiased;overflow:hidden;
+  }
+  #topNum{
+    position:fixed;top:26px;left:0;right:0;text-align:center;
+    font-size:21px;font-weight:500;letter-spacing:.14em;color:#efe1c6;
+    font-variant-numeric:tabular-nums;text-shadow:0 0 22px rgba(255,150,60,.35);
+    pointer-events:none;user-select:none;
+  }
+  .stage{position:relative}
+  canvas{display:block;width:340px;height:520px;max-width:92vw;touch-action:none;cursor:ns-resize}
+  canvas.locked{cursor:default}
+  .controls{display:flex;gap:10px;flex-wrap:wrap;justify-content:center;margin-top:4px}
+  button{
+    font-family:"DM Sans",sans-serif;font-size:14px;font-weight:500;letter-spacing:.01em;color:#ece3d2;
+    padding:12px 22px;border-radius:999px;cursor:pointer;
+    background:rgba(255,255,255,.05);border:1px solid rgba(255,225,180,.16);backdrop-filter:blur(6px);
+    transition:transform .12s ease, background .25s ease, border-color .25s ease, opacity .25s, box-shadow .25s;
+  }
+  button:hover:not(:disabled){background:rgba(255,170,80,.14);border-color:rgba(255,190,110,.45);box-shadow:0 0 24px rgba(255,150,60,.12)}
+  button:active:not(:disabled){transform:translateY(1px)}
+  button.primary{background:rgba(255,150,55,.16);border-color:rgba(255,180,100,.5)}
+  button.primary:hover:not(:disabled){background:rgba(255,160,60,.26)}
+  button:disabled{opacity:.26;cursor:not-allowed}
+</style>
+</head>
+<body>
+  <div id="topNum">1:00</div>
+  <div class="stage"><canvas id="stage" width="340" height="520"></canvas></div>
+  <div class="controls">
+    <button class="primary" id="btnLight">불 켜기</button>
+    <button id="btnBlow" disabled>불 끄기</button>
+    <button id="btnReset">새 초</button>
+  </div>
+
+<script>
+const cv = document.getElementById('stage');
+const ctx = cv.getContext('2d');
+const W = 340, H = 520, DPR = Math.min(window.devicePixelRatio || 1, 2);
+cv.width = W * DPR; cv.height = H * DPR;
+ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+const cx = 170, baseY = 474, cw = 56;
+// anchor points (분 단위 걸림 지점) : 시간(초) <-> 높이(px)
+const ANCH = [{t:60,h:90},{t:180,h:150},{t:300,h:210},{t:600,h:290},{t:900,h:360}];
+const MINH = ANCH[0].h, MAXH = ANCH[ANCH.length-1].h, DETENT = 10;
+
+const POOL_W = cw + 18, POOL_X0 = cx - POOL_W/2, BINS = 13, binW = POOL_W/BINS;
+const MAXLAYERS = 14, LAYER = 4.6;
+let poolBins = new Array(BINS).fill(0);
+
+let setH = MINH, setHLocked = MINH;
+let durationSec = 60, totalMs = 60000;
+let state = 'idle';
+let p = 0, released = 0;
+let particles = [], meltOrder = [], embers = [];
+let last = performance.now(), outAt = 0;
+let dragging = false;
+let flB = 0, flL = 0;
+
+const topNum = document.getElementById('topNum');
+const btnLight = document.getElementById('btnLight');
+const btnBlow = document.getElementById('btnBlow');
+const btnReset = document.getElementById('btnReset');
+
+function buildCandle(){
+  particles = []; poolBins = new Array(BINS).fill(0); released = 0; meltOrder = [];
+  const rows = Math.floor(MAXH/7.2), cols = 8;
+  for(let r=0;r<rows;r++) for(let c=0;c<cols;c++){
+    particles.push({
+      hx: cx-cw/2+5 + c*(cw-10)/(cols-1) + (Math.random()-0.5)*2.4,
+      hy: baseY-5 - r*7.2 - Math.random()*2,
+      x:0,y:0,vx:0,vy:0,st:'solid',r:1.6+Math.random()*1.0,a:1,burn:false,tx:0,ty:0
+    });
+  }
+  particles.sort((A,B)=>A.hy-B.hy);
+  particles.forEach(q=>{q.x=q.hx;q.y=q.hy;q.st='solid';q.a=1;});
+}
+
+function hToT(h){
+  if(h<=ANCH[0].h) return ANCH[0].t;
+  if(h>=MAXH) return ANCH[ANCH.length-1].t;
+  for(let i=0;i<ANCH.length-1;i++){
+    const a=ANCH[i], b=ANCH[i+1];
+    if(h>=a.h && h<=b.h){ const f=(h-a.h)/(b.h-a.h); return a.t + f*(b.t-a.t); }
+  }
+  return ANCH[0].t;
+}
+
+function light(){
+  if(state==='done') return;
+  if(state==='out'){ state='burning'; return; }
+  if(state==='idle'){
+    setHLocked = setH;
+    const top0 = baseY - setHLocked;
+    meltOrder = [];
+    particles.forEach(q=>{ if(q.hy >= top0){ q.st='solid'; meltOrder.push(q); } else { q.st='hidden'; } });
+    meltOrder.sort((A,B)=>A.hy-B.hy);
+    released = 0; p = 0; state = 'burning';
+  }
+}
+function blow(){ if(state==='burning'){ state='out'; outAt=performance.now(); } }
+function reset(){ state='idle'; p=0; embers=[]; buildCandle(); }
+btnLight.addEventListener('click', light);
+btnBlow.addEventListener('click', blow);
+btnReset.addEventListener('click', reset);
+
+function ptY(e){ const r=cv.getBoundingClientRect(); return (e.clientY-r.top)*(H/r.height); }
+function setFromY(y){
+  let h = baseY - y;
+  h = Math.max(MINH, Math.min(MAXH, h));
+  for(const a of ANCH){ if(Math.abs(h-a.h) < DETENT){ h = a.h; break; } }  // 분 지점에서 걸림
+  setH = h;
+  durationSec = Math.round(hToT(setH));
+  totalMs = durationSec*1000;
+}
+cv.addEventListener('pointerdown', e=>{ if(state!=='idle') return; dragging=true; cv.setPointerCapture(e.pointerId); setFromY(ptY(e)); });
+cv.addEventListener('pointermove', e=>{ if(dragging) setFromY(ptY(e)); });
+cv.addEventListener('pointerup', ()=>{ dragging=false; });
+cv.addEventListener('pointercancel', ()=>{ dragging=false; });
+
+function fmt(ms){ const s=Math.max(0,Math.round(ms/1000)); return Math.floor(s/60)+':'+String(s%60).padStart(2,'0'); }
+function updateUI(){
+  if(state==='idle') topNum.textContent = fmt(totalMs);
+  else if(state==='done') topNum.textContent = '완료';
+  else topNum.textContent = fmt(totalMs*(1-p));
+  btnLight.disabled = (state==='burning'||state==='done');
+  btnLight.textContent = (state==='out') ? '다시 켜기' : '불 켜기';
+  btnBlow.disabled = (state!=='burning');
+  cv.classList.toggle('locked', state!=='idle');
+}
+
+function binIndex(x){ let b=Math.floor((x-POOL_X0)/binW); if(b<0)b=0; if(b>BINS-1)b=BINS-1; return b; }
+function fn(i,t){ return Math.sin(t*2.6+i*1.1)+0.45*Math.sin(t*4.7+i*1.9)+0.2*Math.sin(t*7.5+i*0.6); }
+
+function drawFlame(x, base, t, bright){
+  const fh = 56*(0.92+0.1*flB);
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  const layers = [
+    {c:[255,96,24],  w:1.35, h:1.02, a:0.13},
+    {c:[255,140,38], w:1.0,  h:0.98, a:0.19},
+    {c:[255,196,72], w:0.66, h:0.9,  a:0.26},
+    {c:[255,242,196],w:0.36, h:0.76, a:0.42}
+  ];
+  const N = 9;
+  for(const L of layers){
+    for(let i=0;i<N;i++){
+      const f = i/(N-1);
+      const yy = base - f*fh*L.h;
+      const lean = flL*5*f + fn(i,t)*(0.7+f*3.0);
+      const xx = x + lean;
+      const rad = (16*L.w)*(1-f*0.84) + 1.6;
+      const al = (L.a*bright*(1-f*0.2)).toFixed(3);
+      const g = ctx.createRadialGradient(xx,yy,0,xx,yy,rad*2.3);
+      g.addColorStop(0,'rgba('+L.c[0]+','+L.c[1]+','+L.c[2]+','+al+')');
+      g.addColorStop(1,'rgba('+L.c[0]+','+L.c[1]+','+L.c[2]+',0)');
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(xx,yy,rad*2.3,0,Math.PI*2); ctx.fill();
+    }
+  }
+  const hg = ctx.createRadialGradient(x, base-fh*0.16, 0, x, base-fh*0.16, 9);
+  hg.addColorStop(0,'rgba(255,250,235,'+(0.7*bright).toFixed(3)+')');
+  hg.addColorStop(1,'rgba(255,250,235,0)');
+  ctx.fillStyle=hg; ctx.beginPath(); ctx.arc(x, base-fh*0.16, 9, 0, Math.PI*2); ctx.fill();
+  const bg = ctx.createRadialGradient(x, base-2, 0, x, base-2, 15);
+  bg.addColorStop(0,'rgba(150,185,255,'+(0.2*bright).toFixed(3)+')');
+  bg.addColorStop(1,'rgba(150,185,255,0)');
+  ctx.fillStyle=bg; ctx.beginPath(); ctx.arc(x, base-2, 15, 0, Math.PI*2); ctx.fill();
+  ctx.restore();
+}
+
+function drawEmbers(){
+  ctx.save(); ctx.globalCompositeOperation='lighter';
+  for(const e of embers){
+    const g=ctx.createRadialGradient(e.x,e.y,0,e.x,e.y,e.r*3);
+    g.addColorStop(0,'rgba(255,180,90,'+(e.a*0.7).toFixed(3)+')');
+    g.addColorStop(1,'rgba(255,180,90,0)');
+    ctx.fillStyle=g; ctx.beginPath(); ctx.arc(e.x,e.y,e.r*3,0,Math.PI*2); ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawSmoke(x, by, age){
+  const k=Math.min(age/2600,1), al=0.46*(1-k); if(al<=0) return;
+  ctx.strokeStyle='rgba(205,195,185,'+al+')'; ctx.lineWidth=3; ctx.lineCap='round';
+  ctx.beginPath(); ctx.moveTo(x,by);
+  for(let i=1;i<=8;i++) ctx.lineTo(x+Math.sin(i*0.9+age/300)*(4+i*0.8), by-i*10-k*34);
+  ctx.stroke();
+}
+
+function draw(now){
+  ctx.clearRect(0,0,W,H);
+  const t = now/1000;
+  const topY = (state==='idle') ? (baseY-setH) : (baseY - setHLocked*(1-p));
+  const bright = 0.84 + flB*0.16;
+  const lit = (state==='burning');
+
+  if(lit){
+    const a = ctx.createRadialGradient(cx, topY, 4, cx, topY, 250);
+    a.addColorStop(0,'rgba(255,150,60,'+(0.06*bright).toFixed(3)+')');
+    a.addColorStop(1,'rgba(255,150,60,0)');
+    ctx.fillStyle=a; ctx.fillRect(0,0,W,H);
+  }
+
+  if(state==='idle'){
+    ANCH.forEach(a=>{
+      const ty=baseY-a.h, on=(Math.abs(setH-a.h)<0.5);
+      ctx.strokeStyle = on ? 'rgba(255,190,110,.7)' : 'rgba(255,210,150,.18)';
+      ctx.lineWidth=1;
+      ctx.beginPath(); ctx.moveTo(cx-cw/2-14,ty); ctx.lineTo(cx-cw/2-5,ty); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(cx+cw/2+5,ty); ctx.lineTo(cx+cw/2+14,ty); ctx.stroke();
+    });
+  }
+
+  for(const q of particles){
+    if(q.st==='hidden'||q.st==='dead') continue;
+    let a=q.a;
+    if(q.st==='solid'){
+      if(q.hy < topY-8) continue;            // 아직 초 높이 밖
+      const d=q.hy-topY;
+      if(d<8) a *= Math.max(0, Math.min(1,(d+8)/16));  // 위쪽 가장자리 부드럽게
+    }
+    let cr,cg,cb;
+    if(q.st==='pool'){ cr=216; cg=190; cb=150; }
+    else { const f=Math.max(0,Math.min(1,(q.y-topY)/Math.max(setHLocked,1))); cr=250-f*34|0; cg=226-f*36|0; cb=176-f*30|0; }
+    ctx.fillStyle='rgba('+cr+','+cg+','+cb+','+a.toFixed(3)+')';
+    ctx.beginPath(); ctx.arc(q.x, q.y, q.r, 0, Math.PI*2); ctx.fill();
+  }
+
+  if(state!=='done'){
+    ctx.strokeStyle = lit ? '#3a2410' : '#241708';
+    ctx.lineWidth=2.2; ctx.lineCap='round';
+    ctx.beginPath(); ctx.moveTo(cx, topY+1); ctx.lineTo(cx, topY-9); ctx.stroke();
+  }
+
+  if(lit){ drawFlame(cx, topY-9, t, bright); drawEmbers(); }
+  else if(state==='out') drawSmoke(cx, topY-9, now-outAt);
+}
+
+function loop(now){
+  const dt = Math.min(0.05,(now-last)/1000); last=now;
+  const topY = (state==='idle') ? (baseY-setH) : (baseY - setHLocked*(1-p));
+
+  if(state==='burning'){
+    flB += (Math.random()-0.5)*0.09; flB*=0.95; if(flB>1)flB=1; if(flB<-1)flB=-1;
+    flL += (Math.random()-0.5)*0.20; flL*=0.94;
+    p += (dt*1000)/totalMs;
+    if(p>=1){ p=1; state='done'; }
+    const totalActive = meltOrder.length;
+    const want=Math.floor(p*totalActive);
+    while(released<want){
+      const q=meltOrder[released++];
+      if(q && q.st==='solid'){ q.st='falling'; q.vy=5+Math.random()*12; q.vx=(Math.random()-0.5)*16; q.burn=Math.random()<0.5; }
+    }
+    if(Math.random()<dt*1.4){ embers.push({x:cx+(Math.random()-0.5)*9, y:topY-22, vy:-(16+Math.random()*22), vx:(Math.random()-0.5)*9, a:1, r:0.8+Math.random()*1.0}); }
+  }
+
+  for(const e of embers){ e.vy*=0.99; e.y+=e.vy*dt; e.x+=e.vx*dt; e.a-=0.7*dt; }
+  embers = embers.filter(e=>e.a>0);
+
+  for(const q of particles){
+    if(q.st==='falling'){
+      q.vy+=26*dt; q.y+=q.vy*dt; q.x+=q.vx*dt;
+      if(q.burn){ q.a-=0.85*dt; if(q.a<=0) q.st='dead'; }
+      else {
+        let b=binIndex(q.x);
+        if(b>0 && poolBins[b-1]<poolBins[b]) b--;
+        else if(b<BINS-1 && poolBins[b+1]<poolBins[b]) b++;
+        const surf=baseY-3 - poolBins[b]*LAYER;
+        if(q.y>=surf){
+          if(poolBins[b]>=MAXLAYERS) q.st='dead';
+          else { q.tx=POOL_X0+(b+0.5)*binW+(Math.random()-0.5)*3; q.ty=baseY-3 - poolBins[b]*LAYER; poolBins[b]++; q.st='pool'; }
+        }
+      }
+    } else if(q.st==='pool'){
+      const k=Math.min(1,dt*14); q.x+=(q.tx-q.x)*k; q.y+=(q.ty-q.y)*k;
+    }
+  }
+
+  draw(now);
+  updateUI();
+  requestAnimationFrame(loop);
+}
+buildCandle(); updateUI();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
